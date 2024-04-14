@@ -4,7 +4,6 @@ from typing import List, Optional, Tuple
 
 from injector import inject
 
-
 class FunctionCallValidator(ast.NodeVisitor):
     @inject
     def __init__(
@@ -20,25 +19,40 @@ class FunctionCallValidator(ast.NodeVisitor):
         self.errors = []
         self.allowed_modules = allowed_modules
         self.blocked_modules = blocked_modules
-        assert (
-            allowed_modules is None or blocked_modules is None
-        ), "Only one of allowed_modules or blocked_modules can be set."
-        self.blocked_functions = blocked_functions
         self.allowed_functions = allowed_functions
-        assert (
-            allowed_functions is None or blocked_functions is None
-        ), "Only one of allowed_functions or blocked_functions can be set."
+        self.blocked_functions = blocked_functions
         self.allowed_variables = allowed_variables
+        self.aliases = {}  # Track aliases and their original names
+
+    def visit_Assign(self, node: ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                if isinstance(node.value, ast.Name):
+                    # Link alias to its original name
+                    original = self.aliases.get(node.value.id, node.value.id)
+                    self.aliases[target.id] = original
+                else:
+                    # Check the variable assignment if it's part of the allowed variables
+                    if not self._is_allowed_variable(target.id):
+                        self.errors.append(
+                            f"Error on line {node.lineno}: {self.lines[node.lineno - 1]} "
+                            f"=> Assigning to variable '{target.id}' is not allowed."
+                        )
+
+    def _is_allowed_variable(self, var_name: str) -> bool:
+        # Resolves the actual variable name if it's an alias
+        original_var_name = self.aliases.get(var_name, var_name)
+        if self.allowed_variables is not None:
+            return original_var_name in self.allowed_variables
+        return True
 
     def _is_allowed_function_call(self, func_name: str) -> bool:
+        # Resolve aliases to their original function names before checking
+        original_func_name = self.aliases.get(func_name, func_name)
         if self.allowed_functions is not None:
-            if len(self.allowed_functions) > 0:
-                return func_name in self.allowed_functions
-            return False
+            return original_func_name in self.allowed_functions
         if self.blocked_functions is not None:
-            if len(self.blocked_functions) > 0:
-                return func_name not in self.blocked_functions
-            return True
+            return original_func_name not in self.blocked_functions
         return True
 
     def visit_Call(self, node):
@@ -52,72 +66,35 @@ class FunctionCallValidator(ast.NodeVisitor):
         if not self._is_allowed_function_call(function_name):
             self.errors.append(
                 f"Error on line {node.lineno}: {self.lines[node.lineno - 1]} "
-                f"=> Function '{function_name}' is not allowed.",
+                f"=> Function '{function_name}' is not allowed."
+            )
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            module_name = alias.name.split('.')[0]
+            if not self._is_allowed_module_import(module_name):
+                self.errors.append(
+                    f"Error on line {node.lineno}: {self.lines[node.lineno - 1]} "
+                    f"=> Importing module '{module_name}' is not allowed. "
+                )
+
+    def visit_ImportFrom(self, node):
+        module_name = node.module.split('.')[0] if node.module else ''
+        if not self._is_allowed_module_import(module_name):
+            self.errors.append(
+                f"Error on line {node.lineno}: {self.lines[node.lineno - 1]} "
+                f"=> Importing from module '{node.module}' is not allowed."
             )
 
     def _is_allowed_module_import(self, mod_name: str) -> bool:
         if self.allowed_modules is not None:
-            if len(self.allowed_modules) > 0:
-                return mod_name in self.allowed_modules
-            return False
+            return mod_name in self.allowed_modules
         if self.blocked_modules is not None:
-            if len(self.blocked_modules) > 0:
-                return mod_name not in self.blocked_modules
-            return True
+            return mod_name not in self.blocked_modules
         return True
-
-    def visit_Import(self, node):
-        for alias in node.names:
-            if "." in alias.name:
-                module_name = alias.name.split(".")[0]
-            else:
-                module_name = alias.name
-
-            if not self._is_allowed_module_import(module_name):
-                self.errors.append(
-                    f"Error on line {node.lineno}: {self.lines[node.lineno - 1]} "
-                    f"=> Importing module '{module_name}' is not allowed. ",
-                )
-
-    def visit_ImportFrom(self, node):
-        if "." in node.module:
-            module_name = node.module.split(".")[0]
-        else:
-            module_name = node.module
-
-        if not self._is_allowed_module_import(module_name):
-            self.errors.append(
-                f"Error on line {node.lineno}: {self.lines[node.lineno - 1]} "
-                f"=>  Importing from module '{node.module}' is not allowed.",
-            )
-
-    def _is_allowed_variable(self, var_name: str) -> bool:
-        if self.allowed_variables is not None:
-            if len(self.allowed_variables) > 0:
-                return var_name in self.allowed_variables
-            return False
-        return True
-
-    def visit_Assign(self, node: ast.Assign):
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                variable_name = target.id
-            else:
-                self.errors.append(
-                    f"Error on line {node.lineno}: {self.lines[node.lineno - 1]} "
-                    "=> Complex assignments are not allowed.",
-                )
-                continue
-
-            if not self._is_allowed_variable(variable_name):
-                self.errors.append(
-                    f"Error on line {node.lineno}: {self.lines[node.lineno - 1]} "
-                    f"=> Assigning to {variable_name} is not allowed.",
-                )
 
     def generic_visit(self, node):
         super().generic_visit(node)
-
 
 def format_code_correction_message() -> str:
     return (
